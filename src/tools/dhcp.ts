@@ -116,6 +116,10 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
         const endingAddress = validateIp(args.endingAddress as string);
         const subnetMask = validateIp(args.subnetMask as string);
 
+        // Technitium's scopes/set is one endpoint for both create and update —
+        // pre-check is the only way to give create-vs-update tools distinct
+        // semantics. Accepts a small TOCTOU window in exchange for surprising
+        // a caller less than a silent overwrite.
         const existing = await client.callOrThrow("/api/dhcp/scopes/list");
         const scopes = (existing.scopes as Array<{ name: string }>) ?? [];
         if (scopes.some((s) => s.name === name)) {
@@ -185,6 +189,8 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
       handler: async (args) => {
         const name = validateStringLength(args.name as string, 256, "name");
 
+        // See dhcp_create_scope — same endpoint for both ops, so pre-check
+        // distinguishes "update missing scope" from "silent create".
         const existing = await client.callOrThrow("/api/dhcp/scopes/list");
         const scopes = (existing.scopes as Array<{ name: string }>) ?? [];
         if (!scopes.some((s) => s.name === name)) {
@@ -273,13 +279,12 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
       readonly: false,
       handler: async (args) => {
         const name = validateStringLength(args.name as string, 256, "name");
-        if (typeof args.enabled !== "boolean") {
-          throw new Error("`enabled` must be a boolean");
-        }
-        const endpoint = args.enabled ? "/api/dhcp/scopes/enable" : "/api/dhcp/scopes/disable";
+        const endpoint = args.enabled
+          ? "/api/dhcp/scopes/enable"
+          : "/api/dhcp/scopes/disable";
         const data = await client.callOrThrow(endpoint, { name });
         return JSON.stringify(
-          { success: true, scope: name, enabled: args.enabled, ...data },
+          { success: true, scope: name, enabled: !!args.enabled, ...data },
           null,
           2
         );
@@ -363,17 +368,12 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
         const hardwareAddress = validateMacAddress(args.hardwareAddress as string);
         const ipAddress = validateIp(args.ipAddress as string);
 
-        const existing = await findReservation(client, name, hardwareAddress);
-        if (existing) {
-          throw new Error(
-            `Reservation for ${hardwareAddress} already exists in scope '${name}' (current IP ${existing.address}). Use dhcp_update_reservation to change it.`
-          );
-        }
-
         const params: Record<string, string> = { name, hardwareAddress, ipAddress };
         if (args.hostName !== undefined) params.hostName = String(args.hostName);
         if (args.comments !== undefined) params.comments = String(args.comments);
 
+        // Technitium's addReservedLease rejects duplicate MACs natively
+        // ("A reserved lease with same hardware address already exists...").
         const data = await client.callOrThrow(
           "/api/dhcp/scopes/addReservedLease",
           params
@@ -415,6 +415,8 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
           );
         }
 
+        // For each field: caller-provided wins, otherwise inherit existing.
+        // Empty string is treated as "clear" (i.e. don't pass to addReservedLease).
         const merged: Record<string, string> = {
           name,
           hardwareAddress,
@@ -422,13 +424,12 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
             (args.ipAddress as string) ?? (existing.address as string) ?? ""
           ),
         };
-        const newHost = args.hostName !== undefined ? String(args.hostName) : existing.hostName;
+        const newHost =
+          args.hostName !== undefined ? String(args.hostName) : (existing.hostName ?? "");
         const newComments =
-          args.comments !== undefined ? String(args.comments) : existing.comments;
-        if (newHost !== undefined && newHost !== null && newHost !== "")
-          merged.hostName = String(newHost);
-        if (newComments !== undefined && newComments !== null && newComments !== "")
-          merged.comments = String(newComments);
+          args.comments !== undefined ? String(args.comments) : (existing.comments ?? "");
+        if (newHost) merged.hostName = newHost;
+        if (newComments) merged.comments = newComments;
 
         await client.callOrThrow("/api/dhcp/scopes/removeReservedLease", {
           name,
@@ -549,7 +550,7 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
         const data = await client.callOrThrow("/api/dhcp/leases/list");
         let leases = (data.leases as Lease[]) ?? [];
         if (args.scope) {
-          const scope = String(args.scope);
+          const scope = validateStringLength(args.scope as string, 256, "scope");
           leases = leases.filter((l) => l.scope === scope);
         }
         if (args.type) {
@@ -576,6 +577,9 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
       handler: async (args) => {
         if (!args.hardwareAddress && !args.ipAddress) {
           throw new Error("Provide hardwareAddress or ipAddress");
+        }
+        if (args.hardwareAddress && args.ipAddress) {
+          throw new Error("Provide hardwareAddress OR ipAddress, not both");
         }
         const data = await client.callOrThrow("/api/dhcp/leases/list");
         const leases = (data.leases as Lease[]) ?? [];
