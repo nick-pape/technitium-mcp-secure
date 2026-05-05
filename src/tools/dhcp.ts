@@ -417,12 +417,16 @@ export function dhcpTools(client: TechnitiumClient): ToolEntry[] {
 
         // For each field: caller-provided wins, otherwise inherit existing.
         // Empty string is treated as "clear" (i.e. don't pass to addReservedLease).
+        const ipSource = (args.ipAddress as string) ?? (existing.address as string);
+        if (!ipSource) {
+          throw new Error(
+            `Reservation for ${hardwareAddress} has no current IP and none was provided. Pass ipAddress to set one.`
+          );
+        }
         const merged: Record<string, string> = {
           name,
           hardwareAddress,
-          ipAddress: validateIp(
-            (args.ipAddress as string) ?? (existing.address as string) ?? ""
-          ),
+          ipAddress: validateIp(ipSource),
         };
         const newHost =
           args.hostName !== undefined ? String(args.hostName) : (existing.hostName ?? "");
